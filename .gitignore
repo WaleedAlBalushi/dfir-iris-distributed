@@ -1,0 +1,38 @@
+# Secrets
+.env
+*.env
+!*.env.template
+secrets/
+**/secrets/
+initial-credentials.txt
+application-connection.env
+
+# Certificates and private keys
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Backups / generated files
+backups/
+*.sql
+*.dump
+*.tar
+*.tar.gz
+*.zip
+*.backup
+
+# Logs / runtime
+logs/
+*.log
+state/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
