@@ -1,0 +1,2 @@
+# Patch files preserve unified-diff formatting.
+soc/patches/*.patch -whitespace

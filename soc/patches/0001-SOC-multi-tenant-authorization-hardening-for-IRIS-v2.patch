@@ -1,0 +1,1722 @@
+From 7ed6b99ffe562bec2fbd70409f82936eb09d834c Mon Sep 17 00:00:00 2001
+From: WaleedAlBalushi <255945363+WaleedAlBalushi@users.noreply.github.com>
+Date: Sun, 6 Sep 2026 13:50:32 +0300
+Subject: [PATCH] SOC multi-tenant authorization hardening for IRIS v2.4.29
+
+---
+ .gitignore                                    |   7 +-
+ source/app/__init__.py                        |   2 +-
+ source/app/blueprints/alerts/alerts_routes.py |   2 +-
+ source/app/blueprints/case/case_ioc_routes.py |  31 +-
+ source/app/blueprints/case/case_routes.py     |   6 +
+ .../blueprints/manage/manage_cases_routes.py  |  10 +-
+ .../manage/manage_customers_routes.py         |   4 +-
+ source/app/blueprints/manage/manage_users.py  | 412 +++++++++++++++++-
+ .../templates/modal_case_info_from_case.html  |   4 +
+ .../app/blueprints/reports/reports_route.py   |   9 +-
+ source/app/blueprints/search/search_routes.py |  11 +
+ source/app/business/cases.py                  |   2 +-
+ .../app/datamgmt/activities/activities_db.py  |  31 +-
+ source/app/datamgmt/manage/manage_users_db.py | 150 ++++++-
+ .../app/iris_engine/access_control/utils.py   | 133 +++++-
+ source/app/iris_engine/updater/updater.py     |  20 +
+ source/app/models/authorization.py            |  12 +
+ source/app/post_init.py                       | 160 +++++++
+ 18 files changed, 941 insertions(+), 65 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index c1c1d70c..f12b89ac 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -30,4 +30,9 @@ source/app/static/assets/img/graph/*
+ run_nv_test.py
+ !certificates/web_certificates/iris_dev_*
+ certificates/web_certificates/*.pem
+-ui/
+\ No newline at end of file
++ui/
++# SOC development/runtime artifacts
++runtime-backup-*/
++*.pre-*
++*.before-*
++*.bak
+diff --git a/source/app/__init__.py b/source/app/__init__.py
+index 01909402..dc7ae5e4 100644
+--- a/source/app/__init__.py
++++ b/source/app/__init__.py
+@@ -82,7 +82,7 @@ def ac_current_user_has_permission(*permissions):
+ 
+ def ac_current_user_has_manage_perms():
+ 
+-    if session['permissions'] != 1 and session['permissions'] & 0x1FFFFF0 != 0:
++    if session.get('permissions', 0) & ~0x1:
+         return True
+     return False
+ 
+diff --git a/source/app/blueprints/alerts/alerts_routes.py b/source/app/blueprints/alerts/alerts_routes.py
+index 6baf271d..83a53cbb 100644
+--- a/source/app/blueprints/alerts/alerts_routes.py
++++ b/source/app/blueprints/alerts/alerts_routes.py
+@@ -181,7 +181,7 @@ def alerts_list_route() -> Response:
+ 
+ 
+ @alerts_blueprint.route('/alerts/add', methods=['POST'])
+-@ac_api_requires(Permissions.alerts_write)
++@ac_api_requires(Permissions.alerts_write, Permissions.alerts_ingest)
+ def alerts_add_route() -> Response:
+     """
+     Add a new alert to the database
+diff --git a/source/app/blueprints/case/case_ioc_routes.py b/source/app/blueprints/case/case_ioc_routes.py
+index 51834f46..630d0381 100644
+--- a/source/app/blueprints/case/case_ioc_routes.py
++++ b/source/app/blueprints/case/case_ioc_routes.py
+@@ -53,11 +53,14 @@ from app.forms import ModalAddCaseAssetForm
+ from app.forms import ModalAddCaseIOCForm
+ from app.iris_engine.module_handler.module_handler import call_modules_hook
+ from app.iris_engine.utils.tracker import track_activity
++from app.iris_engine.access_control.utils import ac_current_user_has_permission
+ from app.models.authorization import CaseAccessLevel
++from app.models.authorization import Permissions
+ from app.models.models import Ioc
+ from app.schema.marshables import CommentSchema
+ from app.schema.marshables import IocSchema
+ from app.util import ac_api_case_requires
++from app.util import ac_api_requires
+ from app.util import ac_case_requires
+ from app.util import response_error
+ from app.util import response_success
+@@ -125,8 +128,10 @@ def case_ioc_state(caseid):
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/add', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_add_ioc(caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_write):
++        return response_error('Permission denied', status=403)
+     ioc_schema = IocSchema()
+ 
+     try:
+@@ -137,8 +142,10 @@ def case_add_ioc(caseid):
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/upload', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_upload_ioc(caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_write):
++        return response_error('Permission denied', status=403)
+     try:
+         # validate before saving
+         add_ioc_schema = IocSchema()
+@@ -245,8 +252,10 @@ def case_add_ioc_modal(caseid):
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/delete/<int:cur_id>', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_delete_ioc(cur_id, caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_delete):
++        return response_error('Permission denied', status=403)
+     try:
+ 
+         msg = delete(cur_id, caseid)
+@@ -292,8 +301,10 @@ def case_view_ioc(cur_id, caseid):
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/update/<int:cur_id>', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_update_ioc(cur_id, caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_write):
++        return response_error('Permission denied', status=403)
+     ioc_schema = IocSchema()
+ 
+     try:
+@@ -329,8 +340,10 @@ def case_comment_ioc_list(cur_id, caseid):
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/<int:cur_id>/comments/add', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_comment_ioc_add(cur_id, caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_write):
++        return response_error('Permission denied', status=403)
+ 
+     try:
+         ioc = get_ioc(cur_id, caseid=caseid)
+@@ -376,15 +389,19 @@ def case_comment_ioc_get(cur_id, com_id, caseid):
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/<int:cur_id>/comments/<int:com_id>/edit', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_comment_ioc_edit(cur_id, com_id, caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_write):
++        return response_error('Permission denied', status=403)
+ 
+     return case_comment_update(com_id, 'ioc', caseid)
+ 
+ 
+ @case_ioc_blueprint.route('/case/ioc/<int:cur_id>/comments/<int:com_id>/delete', methods=['POST'])
+-@ac_api_case_requires(CaseAccessLevel.full_access)
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def case_comment_ioc_delete(cur_id, com_id, caseid):
++    if not ac_current_user_has_permission(Permissions.ioc_delete):
++        return response_error('Permission denied', status=403)
+ 
+     success, msg = delete_ioc_comment(cur_id, com_id)
+     if not success:
+diff --git a/source/app/blueprints/case/case_routes.py b/source/app/blueprints/case/case_routes.py
+index bc96748a..3be81fee 100644
+--- a/source/app/blueprints/case/case_routes.py
++++ b/source/app/blueprints/case/case_routes.py
+@@ -64,10 +64,13 @@ from app.iris_engine.utils.tracker import track_activity
+ from app.models import CaseStatus, ReviewStatusList
+ from app.models import UserActivity
+ from app.models.authorization import CaseAccessLevel
++from app.models.authorization import Permissions
+ from app.models.authorization import User
+ from app.schema.marshables import TaskLogSchema, CaseSchema, CaseDetailsSchema
+ from app.util import ac_api_case_requires, add_obj_history_entry
++from app.util import ac_api_requires
+ from app.util import ac_case_requires
++from app.util import ac_requires
+ from app.util import ac_socket_requires
+ from app.util import response_error
+ from app.util import response_success
+@@ -278,6 +281,7 @@ def case_get_users(caseid):
+ 
+ 
+ @case_blueprint.route('/case/groups/access/modal', methods=['GET'])
++@ac_requires(Permissions.case_acl_manage)
+ @ac_case_requires(CaseAccessLevel.full_access)
+ def groups_cac_view(caseid, url_redir):
+     if url_redir:
+@@ -290,6 +294,7 @@ def groups_cac_view(caseid, url_redir):
+ 
+ 
+ @case_blueprint.route('/case/access/set-group', methods=['POST'])
++@ac_api_requires(Permissions.case_acl_manage)
+ @ac_api_case_requires(CaseAccessLevel.full_access)
+ def group_cac_set_case(caseid):
+ 
+@@ -332,6 +337,7 @@ def group_cac_set_case(caseid):
+ 
+ 
+ @case_blueprint.route('/case/access/set-user', methods=['POST'])
++@ac_api_requires(Permissions.case_acl_manage)
+ @ac_api_case_requires(CaseAccessLevel.full_access)
+ def user_cac_set_case(caseid):
+ 
+diff --git a/source/app/blueprints/manage/manage_cases_routes.py b/source/app/blueprints/manage/manage_cases_routes.py
+index b0d6580a..7a766e33 100644
+--- a/source/app/blueprints/manage/manage_cases_routes.py
++++ b/source/app/blueprints/manage/manage_cases_routes.py
+@@ -80,7 +80,7 @@ manage_cases_blueprint = Blueprint('manage_case',
+ 
+ # CONTENT ------------------------------------------------
+ @manage_cases_blueprint.route('/manage/cases', methods=['GET'])
+-@ac_requires(Permissions.standard_user, no_cid_required=True)
++@ac_requires(Permissions.standard_user, Permissions.cases_read, no_cid_required=True)
+ def manage_index_cases(caseid, url_redir):
+     if url_redir:
+         return redirect(url_for('manage_case.manage_index_cases', cid=caseid))
+@@ -230,7 +230,7 @@ def manage_case_filter() -> Response:
+ 
+ 
+ @manage_cases_blueprint.route('/manage/cases/delete/<int:cur_id>', methods=['POST'])
+-@ac_api_requires(Permissions.standard_user)
++@ac_api_requires(Permissions.case_delete)
+ def api_delete_case(cur_id):
+     try:
+         delete(cur_id)
+@@ -242,7 +242,7 @@ def api_delete_case(cur_id):
+ 
+ 
+ @manage_cases_blueprint.route('/manage/cases/reopen/<int:cur_id>', methods=['POST'])
+-@ac_api_requires(Permissions.standard_user)
++@ac_api_requires(Permissions.case_reopen)
+ def api_reopen_case(cur_id):
+     if not ac_fast_check_current_user_has_case_access(cur_id, [CaseAccessLevel.full_access]):
+         return ac_api_return_access_denied(caseid=cur_id)
+@@ -279,7 +279,7 @@ def api_reopen_case(cur_id):
+ 
+ 
+ @manage_cases_blueprint.route('/manage/cases/close/<int:cur_id>', methods=['POST'])
+-@ac_api_requires(Permissions.standard_user)
++@ac_api_requires(Permissions.case_close)
+ def api_case_close(cur_id):
+     if not ac_fast_check_current_user_has_case_access(cur_id, [CaseAccessLevel.full_access]):
+         return ac_api_return_access_denied(caseid=cur_id)
+@@ -356,7 +356,7 @@ def api_add_case():
+ 
+ 
+ @manage_cases_blueprint.route('/manage/cases/list', methods=['GET'])
+-@ac_api_requires(Permissions.standard_user)
++@ac_api_requires(Permissions.standard_user, Permissions.cases_read)
+ def api_list_case():
+     data = list_cases_dict(current_user.id)
+ 
+diff --git a/source/app/blueprints/manage/manage_customers_routes.py b/source/app/blueprints/manage/manage_customers_routes.py
+index aff4c6d4..aa8dc5b6 100644
+--- a/source/app/blueprints/manage/manage_customers_routes.py
++++ b/source/app/blueprints/manage/manage_customers_routes.py
+@@ -350,7 +350,7 @@ def add_customers_modal(caseid, url_redir):
+ 
+ 
+ @manage_customers_blueprint.route('/manage/customers/add', methods=['POST'])
+-@ac_api_requires(Permissions.customers_write)
++@ac_api_requires(Permissions.platform_tenants_manage)
+ def add_customers():
+     if not request.is_json:
+         return response_error("Invalid request")
+@@ -374,7 +374,7 @@ def add_customers():
+ 
+ 
+ @manage_customers_blueprint.route('/manage/customers/delete/<int:client_id>', methods=['POST'])
+-@ac_api_requires(Permissions.customers_write)
++@ac_api_requires(Permissions.platform_tenants_manage)
+ @ac_api_requires_client_access()
+ def delete_customers(client_id):
+     try:
+diff --git a/source/app/blueprints/manage/manage_users.py b/source/app/blueprints/manage/manage_users.py
+index 46f62529..ab665983 100644
+--- a/source/app/blueprints/manage/manage_users.py
++++ b/source/app/blueprints/manage/manage_users.py
+@@ -42,6 +42,7 @@ from app.datamgmt.manage.manage_users_db import get_user_details
+ from app.datamgmt.manage.manage_users_db import get_user_effective_permissions
+ from app.datamgmt.manage.manage_users_db import get_users_list
+ from app.datamgmt.manage.manage_users_db import get_users_list_restricted
++from app.datamgmt.manage.manage_users_db import user_is_visible_to_user
+ from app.datamgmt.manage.manage_users_db import remove_case_access_from_user
+ from app.datamgmt.manage.manage_users_db import remove_cases_access_from_user
+ from app.datamgmt.manage.manage_users_db import update_user
+@@ -51,6 +52,9 @@ from app.iris_engine.access_control.utils import ac_get_all_access_level
+ from app.iris_engine.access_control.utils import ac_current_user_has_permission
+ from app.iris_engine.utils.tracker import track_activity
+ from app.models.authorization import Permissions
++from app.models.authorization import UserClient
++from app.models.authorization import Group
++from app.models.authorization import UserGroup
+ from app.schema.marshables import UserSchema
+ from app.schema.marshables import BasicUserSchema
+ from app.schema.marshables import UserFullSchema
+@@ -93,17 +97,221 @@ def _filter_admin_user_payload(jsdata):
+     return {k: v for k, v in jsdata.items() if k in _ADMIN_USER_WRITABLE_FIELDS}
+ 
+ 
++
++_APPROVED_TENANT_ROLE_NAMES = {
++    "SOC Viewer",
++    "SOC Auditor",
++    "SOC L1",
++    "SOC L2",
++    "SOC L3",
++    "SOC Admin",
++}
++
++
++def _get_approved_tenant_role_groups():
++    return Group.query.filter(
++        Group.group_name.in_(
++            _APPROVED_TENANT_ROLE_NAMES
++        )
++    ).order_by(
++        Group.group_name
++    ).all()
++
++
++def _tenant_admin_can_assign_groups(group_ids):
++    if ac_current_user_has_permission(
++        Permissions.server_administrator
++    ):
++        return True
++
++    try:
++        requested_ids = {
++            int(group_id)
++            for group_id in group_ids
++        }
++    except (TypeError, ValueError):
++        return False
++
++    if not requested_ids:
++        return False
++
++    groups = Group.query.filter(
++        Group.group_id.in_(requested_ids)
++    ).all()
++
++    if len(groups) != len(requested_ids):
++        return False
++
++    for group in groups:
++
++        if group.group_name not in _APPROVED_TENANT_ROLE_NAMES:
++            return False
++
++        # Defense in depth: even if an approved role were accidentally
++        # modified, a tenant administrator must never assign a role
++        # carrying platform-global permissions.
++        if (
++            group.group_permissions
++            & Permissions.server_administrator.value
++        ):
++            return False
++
++        if (
++            group.group_permissions
++            & Permissions.platform_tenants_manage.value
++        ):
++            return False
++
++    return True
++
++
++_TENANT_USER_WRITABLE_FIELDS = {
++    'csrf_token',
++    'user_id',
++    'user_name',
++    'user_login',
++    'user_email',
++    'user_password',
++    'active',
++}
++
++
++def _filter_tenant_user_payload(jsdata):
++    """
++    Tenant administrators may manage ordinary human-user fields only.
++
++    Platform-only fields such as service-account status, organisation,
++    role strings and administrative flags are deliberately excluded.
++    """
++    if not isinstance(jsdata, dict):
++        return {}
++
++    return {
++        k: v for k, v in jsdata.items()
++        if k in _TENANT_USER_WRITABLE_FIELDS
++    }
++
++
++def _current_user_client_ids():
++    return {
++        row[0]
++        for row in UserClient.query.with_entities(
++            UserClient.client_id
++        ).filter(
++            UserClient.user_id == current_user.id
++        ).all()
++    }
++
++
++def _target_user_client_ids(user_id):
++    return {
++        row[0]
++        for row in UserClient.query.with_entities(
++            UserClient.client_id
++        ).filter(
++            UserClient.user_id == user_id
++        ).all()
++    }
++
++
++def _tenant_admin_can_manage_user(user_id):
++    """
++    Tenant administrators may manage only ordinary SOC users completely
++    contained inside their own tenant scope.
++
++    Platform administrators, service accounts, global-role users and
++    shared cross-tenant provider users remain protected.
++    """
++    if ac_current_user_has_permission(Permissions.server_administrator):
++        return True
++
++    target_user = get_user(user_id)
++
++    if not target_user:
++        return False
++
++    # Service-account lifecycle remains Platform Admin controlled.
++    if target_user.is_service_account:
++        return False
++
++    manager_clients = _current_user_client_ids()
++    target_clients = _target_user_client_ids(user_id)
++
++    if not manager_clients or not target_clients:
++        return False
++
++    if not target_clients.issubset(manager_clients):
++        return False
++
++    target_groups = Group.query.join(
++        UserGroup,
++        UserGroup.group_id == Group.group_id
++    ).filter(
++        UserGroup.user_id == user_id
++    ).all()
++
++    for group in target_groups:
++
++        # Tenant administrators may not manipulate legacy/global or
++        # custom-role accounts.
++        if group.group_name not in _APPROVED_TENANT_ROLE_NAMES:
++            return False
++
++        if (
++            group.group_permissions
++            & Permissions.server_administrator.value
++        ):
++            return False
++
++        if (
++            group.group_permissions
++            & Permissions.platform_tenants_manage.value
++        ):
++            return False
++
++    return True
++
++
++def _tenant_admin_can_assign_customers(customer_ids):
++    if ac_current_user_has_permission(Permissions.server_administrator):
++        return True
++
++    try:
++        requested = {int(client_id) for client_id in customer_ids}
++    except (TypeError, ValueError):
++        return False
++
++    if not requested:
++        return False
++
++    return requested.issubset(_current_user_client_ids())
++
++
++def _tenant_user_access_denied():
++    return response_error(
++        "User is outside your tenant administration scope",
++        status=403
++    )
++
++
+ @manage_users_blueprint.route('/manage/users/list', methods=['GET'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_read)
+ def manage_users_list():
+ 
+-    users = get_users_list()
++    is_server_admin = ac_current_user_has_permission(Permissions.server_administrator)
++    if is_server_admin:
++        users = get_users_list()
++    else:
++        users = get_users_list_restricted(
++            current_user_id=current_user.id,
++            is_server_administrator=False
++        )
+ 
+     return response_success('', data=users)
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/filter', methods=['GET'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_read)
+ def manage_users_filter():
+ 
+     page = request.args.get('page', 1, type=int)
+@@ -128,6 +336,36 @@ def manage_users_filter():
+     user_name = request.args.get('user_name', None, type=str)
+     user_login = request.args.get('user_login', None, type=str)
+ 
++    if not ac_current_user_has_permission(Permissions.server_administrator):
++        manager_clients = _current_user_client_ids()
++
++        if customer_id is not None:
++            try:
++                if int(customer_id) not in manager_clients:
++                    return response_error(
++                        "Customer is outside your tenant scope",
++                        status=403
++                    )
++            except ValueError:
++                return response_error("Invalid customer_id parameter")
++
++        visible_users = get_users_list_restricted(
++            current_user_id=current_user.id,
++            is_server_administrator=False
++        )
++
++        visible_ids = {
++            item['user_id']
++            for item in visible_users
++        }
++
++        if user_ids_str:
++            user_ids_str = list(
++                visible_ids.intersection(set(user_ids_str))
++            )
++        else:
++            user_ids_str = list(visible_ids)
++
+     filtered_users = get_filtered_users(user_ids=user_ids_str,
+                                         user_name=user_name,
+                                         user_login=user_login,
+@@ -151,7 +389,7 @@ def manage_users_filter():
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/add/modal', methods=['GET'])
+-@ac_requires(Permissions.server_administrator, no_cid_required=True)
++@ac_requires(Permissions.server_administrator, Permissions.tenant_users_manage, no_cid_required=True)
+ def add_user_modal(caseid, url_redir):
+     if url_redir:
+         return redirect(url_for('manage_users.add_user', cid=caseid))
+@@ -165,13 +403,45 @@ def add_user_modal(caseid, url_redir):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/add', methods=['POST'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def add_user():
+     try:
+ 
++        raw_data = request.get_json() or {}
++        is_server_admin = ac_current_user_has_permission(
++            Permissions.server_administrator
++        )
++
++        requested_customers = raw_data.get('customers_membership')
++
++        if not is_server_admin:
++            manager_clients = _current_user_client_ids()
++
++            if requested_customers is None:
++                if len(manager_clients) == 1:
++                    requested_customers = list(manager_clients)
++                else:
++                    return response_error(
++                        "customers_membership is required for multi-tenant administrators",
++                        status=400
++                    )
++
++            if (
++                type(requested_customers) is not list
++                or not _tenant_admin_can_assign_customers(requested_customers)
++            ):
++                return response_error(
++                    "Requested customer membership is outside your tenant scope",
++                    status=403
++                )
++
++            jsdata = _filter_tenant_user_payload(raw_data)
++
++        else:
++            jsdata = _filter_admin_user_payload(raw_data)
++
+         # validate before saving
+         user_schema = UserSchema()
+-        jsdata = _filter_admin_user_payload(request.get_json())
+         jsdata['user_id'] = 0
+         jsdata['active'] = jsdata.get('active', True)
+         cuser = user_schema.load(jsdata, partial=True)
+@@ -182,8 +452,16 @@ def add_user():
+                            user_active=jsdata.get('active'),
+                            user_is_service_account=cuser.is_service_account)
+ 
++        if not is_server_admin:
++            update_user_customers(
++                user_id=user.id,
++                customers=requested_customers
++            )
++
+         udata = user_schema.dump(user)
+-        udata['user_api_key'] = user.api_key
++
++        if is_server_admin:
++            udata['user_api_key'] = user.api_key
+ 
+         if cuser:
+             track_activity("created user {}".format(user.user),  ctx_less=True)
+@@ -196,9 +474,18 @@ def add_user():
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/<int:cur_id>', methods=['GET'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_read)
+ def view_user(cur_id):
+ 
++    if not user_is_visible_to_user(
++        target_user_id=cur_id,
++        current_user_id=current_user.id,
++        is_server_administrator=ac_current_user_has_permission(
++            Permissions.server_administrator
++        )
++    ):
++        return _tenant_user_access_denied()
++
+     user = get_user_details(user_id=cur_id)
+ 
+     if not user:
+@@ -208,13 +495,27 @@ def view_user(cur_id):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/<int:cur_id>/modal', methods=['GET'])
+-@ac_requires(Permissions.server_administrator, no_cid_required=True)
++@ac_requires(Permissions.server_administrator, Permissions.tenant_users_read, no_cid_required=True)
+ def view_user_modal(cur_id, caseid, url_redir):
++    if not user_is_visible_to_user(
++        target_user_id=cur_id,
++        current_user_id=current_user.id,
++        is_server_administrator=ac_current_user_has_permission(
++            Permissions.server_administrator
++        )
++    ):
++        return _tenant_user_access_denied()
++
+     if url_redir:
+         return redirect(url_for('manage_users.add_user', cid=caseid))
+ 
+     form = AddUserForm()
+-    user = get_user_details(cur_id, include_api_key=True)
++    user = get_user_details(
++        cur_id,
++        include_api_key=ac_current_user_has_permission(
++            Permissions.server_administrator
++        )
++    )
+ 
+     if not user:
+         return response_error("Invalid user ID")
+@@ -233,8 +534,12 @@ def view_user_modal(cur_id, caseid, url_redir):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/<int:cur_id>/groups/modal', methods=['GET'])
+-@ac_requires(Permissions.server_administrator, no_cid_required=True)
++@ac_requires(Permissions.server_administrator, Permissions.tenant_users_manage, no_cid_required=True)
+ def manage_user_group_modal(cur_id, caseid, url_redir):
++
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     if url_redir:
+         return redirect(url_for('manage_users.add_user', cid=caseid))
+ 
+@@ -242,15 +547,23 @@ def manage_user_group_modal(cur_id, caseid, url_redir):
+     if not user:
+         return response_error("Invalid user ID")
+ 
+-    groups = get_groups_list()
++    if ac_current_user_has_permission(
++        Permissions.server_administrator
++    ):
++        groups = get_groups_list()
++    else:
++        groups = _get_approved_tenant_role_groups()
+ 
+     return render_template("modal_manage_user_groups.html", groups=groups, user=user)
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/<int:cur_id>/groups/update', methods=['POST'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def manage_user_group_(cur_id):
+ 
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     if not request.is_json:
+         return response_error("Invalid request")
+ 
+@@ -260,6 +573,14 @@ def manage_user_group_(cur_id):
+     if type(request.json.get('groups_membership')) is not list:
+         return response_error("Expected list of groups ID")
+ 
++    if not _tenant_admin_can_assign_groups(
++        request.json.get('groups_membership')
++    ):
++        return response_error(
++            "Requested role assignment is not allowed",
++            status=403
++        )
++
+     user = get_user_details(cur_id)
+     if not user:
+         return response_error("Invalid user ID")
+@@ -273,8 +594,11 @@ def manage_user_group_(cur_id):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/<int:cur_id>/customers/modal', methods=['GET'])
+-@ac_requires(Permissions.server_administrator, no_cid_required=True)
++@ac_requires(Permissions.server_administrator, Permissions.tenant_users_manage, no_cid_required=True)
+ def manage_user_customers_modal(cur_id, caseid, url_redir):
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     if url_redir:
+         return redirect(url_for('manage_users.add_user', cid=caseid))
+ 
+@@ -290,9 +614,12 @@ def manage_user_customers_modal(cur_id, caseid, url_redir):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/<int:cur_id>/customers/update', methods=['POST'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def manage_user_customers_(cur_id):
+ 
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     if not request.is_json:
+         return response_error("Invalid request")
+ 
+@@ -302,6 +629,14 @@ def manage_user_customers_(cur_id):
+     if type(request.json.get('customers_membership')) is not list:
+         return response_error("Expected list of customers ID")
+ 
++    if not _tenant_admin_can_assign_customers(
++        request.json.get('customers_membership')
++    ):
++        return response_error(
++            "Requested customer membership is outside your tenant scope",
++            status=403
++        )
++
+     user = get_user_details(cur_id)
+     if not user:
+         return response_error('Invalid user ID')
+@@ -455,10 +790,13 @@ def manage_user_cac_delete_case(cur_id):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/update/<int:cur_id>', methods=['POST'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def update_user_api(cur_id):
+ 
+     try:
++        if not _tenant_admin_can_manage_user(cur_id):
++            return _tenant_user_access_denied()
++
+         user = get_user(cur_id)
+         if not user:
+             return response_error("Invalid user ID for this case")
+@@ -468,7 +806,12 @@ def update_user_api(cur_id):
+ 
+         # validate before saving
+         user_schema = UserSchema()
+-        jsdata = _filter_admin_user_payload(request.get_json())
++
++        if ac_current_user_has_permission(Permissions.server_administrator):
++            jsdata = _filter_admin_user_payload(request.get_json())
++        else:
++            jsdata = _filter_tenant_user_payload(request.get_json())
++
+         jsdata['user_id'] = cur_id
+         cuser = user_schema.load(jsdata, instance=user, partial=True)
+         update_user(password=jsdata.get('user_password'),
+@@ -486,9 +829,12 @@ def update_user_api(cur_id):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/deactivate/<int:cur_id>', methods=['GET'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def deactivate_user_api(cur_id):
+ 
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     user = get_user(cur_id)
+     if not user:
+         return response_error("Invalid user ID for this case")
+@@ -508,9 +854,12 @@ def deactivate_user_api(cur_id):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/activate/<int:cur_id>', methods=['GET'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def activate_user_api(cur_id):
+ 
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     user = get_user(cur_id)
+     if not user:
+         return response_error("Invalid user ID for this case")
+@@ -547,9 +896,12 @@ def renew_user_api_key(cur_id):
+ 
+ 
+ @manage_users_blueprint.route('/manage/users/delete/<int:cur_id>', methods=['POST'])
+-@ac_api_requires(Permissions.server_administrator)
++@ac_api_requires(Permissions.server_administrator, Permissions.tenant_users_manage)
+ def view_delete_user(cur_id):
+ 
++    if not _tenant_admin_can_manage_user(cur_id):
++        return _tenant_user_access_denied()
++
+     try:
+ 
+         user = get_user(cur_id)
+@@ -584,6 +936,13 @@ def exists_user_restricted(cur_id):
+     if not user:
+         return response_error("Invalid user ID")
+ 
++    if not user_is_visible_to_user(
++            target_user_id=user.id,
++            current_user_id=current_user.id,
++            is_server_administrator=ac_current_user_has_permission(
++                Permissions.server_administrator)):
++        return response_error("Invalid user ID")
++
+     output = {
+         "user_login": user.user,
+         "user_id": user.id,
+@@ -600,6 +959,13 @@ def lookup_name_restricted(login):
+     if not user:
+         return response_error("Invalid login")
+ 
++    if not user_is_visible_to_user(
++            target_user_id=user.id,
++            current_user_id=current_user.id,
++            is_server_administrator=ac_current_user_has_permission(
++                Permissions.server_administrator)):
++        return response_error("Invalid login")
++
+     output = {
+         "user_login": user.user,
+         "user_id": user.id,
+@@ -616,6 +982,10 @@ def lookup_name_restricted(login):
+ @ac_api_requires()
+ def manage_users_list_restricted():
+ 
+-    users = get_users_list_restricted()
++    users = get_users_list_restricted(
++        current_user_id=current_user.id,
++        is_server_administrator=ac_current_user_has_permission(
++            Permissions.server_administrator)
++    )
+ 
+     return response_success('', data=users)
+diff --git a/source/app/blueprints/manage/templates/modal_case_info_from_case.html b/source/app/blueprints/manage/templates/modal_case_info_from_case.html
+index 75d9b2ef..707d3558 100644
+--- a/source/app/blueprints/manage/templates/modal_case_info_from_case.html
++++ b/source/app/blueprints/manage/templates/modal_case_info_from_case.html
+@@ -19,7 +19,9 @@
+                         <a class="nav-link active show" id="pills-home-tab-nobd" data-toggle="pill" href="#details" role="tab" aria-controls="pills-home-nobd" aria-selected="false">Info</a>
+                     </li>
+                     <li class="nav-item submenu">
++                        {% if user_has_perm(std_permissions.case_acl_manage) %}
+                         <a class="nav-link"  data-toggle="pill" href="#case-info-access" role="tab" aria-controls="case-info-access" aria-selected="false">Access</a>
++                        {% endif %}
+                     </li>
+                     {% if attributes and attributes|length > 0 %}
+                         {% for ca in attributes %}
+@@ -311,6 +313,7 @@
+                     </div>
+                 </div>
+               </div>
++              {% if user_has_perm(std_permissions.case_acl_manage) %}
+               <div class="tab-pane" id="case-info-access">
+                     <div class="row">
+                         <div class="col">
+@@ -344,6 +347,7 @@
+                           </div>
+                   </div>
+               </div>
++              {% endif %}
+               {% include 'modals/modal_attributes_tabs.html' %}
+             </div>
+         </div>
+diff --git a/source/app/blueprints/reports/reports_route.py b/source/app/blueprints/reports/reports_route.py
+index 741c7db4..ffe89484 100644
+--- a/source/app/blueprints/reports/reports_route.py
++++ b/source/app/blueprints/reports/reports_route.py
+@@ -29,9 +29,10 @@ from app.iris_engine.reporter.reporter import IrisMakeDocReport
+ from app.iris_engine.reporter.reporter import IrisMakeMdReport
+ from app.iris_engine.utils.tracker import track_activity
+ from app.models import CaseTemplateReport
++from app.models.authorization import CaseAccessLevel
+ from app.util import FileRemover
+ from app.util import ac_api_requires
+-from app.util import ac_requires_case_identifier
++from app.util import ac_api_case_requires
+ from app.util import response_error
+ from app.datamgmt.case.case_db import get_case
+ 
+@@ -41,8 +42,7 @@ file_remover = FileRemover()
+ 
+ 
+ @reports_blueprint.route('/case/report/generate-activities/<int:report_id>', methods=['GET'])
+-@ac_api_requires()
+-@ac_requires_case_identifier()
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def download_case_activity(report_id, caseid):
+ 
+     call_modules_hook('on_preload_activities_report_create', data=report_id, caseid=caseid)
+@@ -87,8 +87,7 @@ def download_case_activity(report_id, caseid):
+ 
+ 
+ @reports_blueprint.route("/case/report/generate-investigation/<int:report_id>", methods=['GET'])
+-@ac_api_requires()
+-@ac_requires_case_identifier()
++@ac_api_case_requires(CaseAccessLevel.read_only, CaseAccessLevel.full_access)
+ def _gen_report(report_id, caseid):
+ 
+     safe_mode = False
+diff --git a/source/app/blueprints/search/search_routes.py b/source/app/blueprints/search/search_routes.py
+index 782c738c..ef516d18 100644
+--- a/source/app/blueprints/search/search_routes.py
++++ b/source/app/blueprints/search/search_routes.py
+@@ -39,6 +39,10 @@ from app.util import ac_api_requires
+ from app.util import ac_requires
+ from app.util import response_success
+ 
++from flask_login import current_user
++from app.iris_engine.access_control.utils import ac_current_user_has_permission
++from app.iris_engine.access_control.utils import ac_get_fast_user_cases_access
++
+ search_blueprint = Blueprint('search',
+                              __name__,
+                              template_folder='templates')
+@@ -54,6 +58,13 @@ def search_file_post():
+     files = []
+     search_condition = and_()
+ 
++    # Restrict global search to cases visible to the current tenant/user.
++    if not ac_current_user_has_permission(Permissions.server_administrator):
++        allowed_case_ids = ac_get_fast_user_cases_access(current_user.id) or []
++        if not allowed_case_ids:
++            return response_success("Results fetched", [])
++        search_condition = Cases.case_id.in_(allowed_case_ids)
++
+     track_activity("started a global search for {} on {}".format(search_value, search_type))
+ 
+     if search_type == "ioc":
+diff --git a/source/app/business/cases.py b/source/app/business/cases.py
+index 8316e1b6..c0b43e1a 100644
+--- a/source/app/business/cases.py
++++ b/source/app/business/cases.py
+@@ -115,7 +115,7 @@ def create(request_json):
+ 
+ 
+ def delete(case_identifier):
+-    check_current_user_has_some_permission([Permissions.standard_user])
++    check_current_user_has_some_permission([Permissions.case_delete])
+     check_current_user_has_some_case_access(case_identifier, [CaseAccessLevel.full_access])
+ 
+     if case_identifier == 1:
+diff --git a/source/app/datamgmt/activities/activities_db.py b/source/app/datamgmt/activities/activities_db.py
+index c1fb0c9b..e8ceb96c 100644
+--- a/source/app/datamgmt/activities/activities_db.py
++++ b/source/app/datamgmt/activities/activities_db.py
+@@ -81,6 +81,33 @@ def get_manual_activities(caseid):
+     return manual_activities
+ 
+ 
++from flask_login import current_user
++from app.models.authorization import Permissions
++from app.iris_engine.access_control.utils import (
++    ac_current_user_has_permission,
++    ac_get_fast_user_cases_access,
++)
++
++
++def _filter_activities_to_current_scope(rows):
++    """Prevent non-admin users from receiving activities from inaccessible cases."""
++    if ac_current_user_has_permission(Permissions.server_administrator):
++        return rows
++
++    allowed_case_ids = set(ac_get_fast_user_cases_access(current_user.id) or [])
++
++    return [
++        row for row in rows
++        if (
++            getattr(row, 'case_id', None) in allowed_case_ids
++            or (
++                getattr(row, 'case_id', None) is None
++                and getattr(row, 'user_id', None) == current_user.id
++            )
++        )
++    ]
++
++
+ def get_users_activities():
+     user_activities = UserActivity.query.with_entities(
+         Cases.name.label("case_name"),
+@@ -99,7 +126,7 @@ def get_users_activities():
+         UserActivity.case
+     ).order_by(desc(UserActivity.activity_date)).limit(10000).all()
+ 
+-    return user_activities
++    return _filter_activities_to_current_scope(user_activities)
+ 
+ 
+ def get_all_users_activities():
+@@ -129,4 +156,4 @@ def get_all_users_activities():
+         UserActivity.case_id == None
+     )).order_by(desc(UserActivity.activity_date)).limit(10000).all()
+ 
+-    return user_activities
++    return _filter_activities_to_current_scope(user_activities)
+diff --git a/source/app/datamgmt/manage/manage_users_db.py b/source/app/datamgmt/manage/manage_users_db.py
+index 266f753d..4076e9eb 100644
+--- a/source/app/datamgmt/manage/manage_users_db.py
++++ b/source/app/datamgmt/manage/manage_users_db.py
+@@ -98,6 +98,74 @@ def get_user_groups(user_id):
+     return output
+ 
+ 
++
++_SOC_READ_ONLY_GROUPS = {
++    "SOC Viewer",
++    "SOC Auditor",
++    "OpenCTI Service",
++    "n8n Automation",
++}
++
++_SOC_FULL_ACCESS_GROUPS = {
++    "SOC L1",
++    "SOC L2",
++    "SOC L3",
++    "SOC Admin",
++}
++
++
++def sync_user_client_access_level(user_id):
++    """
++    Synchronize the UserClient case-access level with the user's SOC role.
++
++    UserClient remains the tenant boundary.
++    Group membership defines the operational role.
++    """
++
++    group_names = {
++        row[0]
++        for row in db.session.query(
++            Group.group_name
++        ).join(
++            UserGroup,
++            UserGroup.group_id == Group.group_id
++        ).filter(
++            UserGroup.user_id == user_id
++        ).all()
++    }
++
++    # Preserve legacy built-in analyst behavior until all old users
++    # have been migrated to the new SOC groups.
++    if (
++        "Administrators" in group_names
++        or "Analysts" in group_names
++        or group_names.intersection(_SOC_FULL_ACCESS_GROUPS)
++    ):
++        access_level = CaseAccessLevel.full_access.value
++
++    elif group_names.intersection(_SOC_READ_ONLY_GROUPS):
++        access_level = CaseAccessLevel.read_only.value
++
++    else:
++        # Membership without an approved operational role must never
++        # automatically become writable.
++        access_level = CaseAccessLevel.deny_all.value
++
++    UserClient.query.filter(
++        UserClient.user_id == user_id
++    ).update(
++        {
++            UserClient.access_level: access_level
++        },
++        synchronize_session=False
++    )
++
++    db.session.commit()
++
++    # Rebuild the materialized effective case-access table.
++    ac_auto_update_user_effective_access(user_id)
++
++
+ def update_user_groups(user_id, groups):
+     cur_groups = UserGroup.query.with_entities(
+         UserGroup.group_id
+@@ -126,7 +194,7 @@ def update_user_groups(user_id, groups):
+ 
+     db.session.commit()
+ 
+-    ac_auto_update_user_effective_access(user_id)
++    sync_user_client_access_level(user_id)
+ 
+ def add_user_to_customer(user_id, customer_id):
+     user_client = UserClient.query.filter(
+@@ -145,7 +213,7 @@ def add_user_to_customer(user_id, customer_id):
+     db.session.add(user_client)
+     db.session.commit()
+ 
+-    ac_auto_update_user_effective_access(user_id)
++    sync_user_client_access_level(user_id)
+ 
+     return True
+ 
+@@ -176,7 +244,7 @@ def update_user_customers(user_id, customers):
+             UserClient.client_id == client_id
+         ).delete()
+ 
+-    ac_auto_update_user_effective_access(user_id)
++    sync_user_client_access_level(user_id)
+ 
+     db.session.commit()
+ 
+@@ -563,10 +631,48 @@ def get_users_list():
+     return output
+ 
+ 
+-def get_users_list_restricted():
+-    users = User.query.all()
++def get_users_list_restricted(current_user_id: int = None,
++                              is_server_administrator: bool = False):
++    """
++    Return users visible to the requesting tenant.
++
++    Server administrators can see all users.
++    Non-administrators can only see users sharing at least one
++    customer (UserClient relationship) with them.
++    """
++    if is_server_administrator:
++        users = User.query.all()
++
++    else:
++        client_ids = [
++            row[0] for row in UserClient.query.with_entities(
++                UserClient.client_id
++            ).filter(
++                UserClient.user_id == current_user_id
++            ).all()
++        ]
++
++        if client_ids:
++            visible_user_ids = [
++                row[0] for row in UserClient.query.with_entities(
++                    UserClient.user_id
++                ).filter(
++                    UserClient.client_id.in_(client_ids)
++                ).distinct().all()
++            ]
++        else:
++            visible_user_ids = []
++
++        # Always allow the user to resolve their own account.
++        if current_user_id not in visible_user_ids:
++            visible_user_ids.append(current_user_id)
++
++        users = User.query.filter(
++            User.id.in_(visible_user_ids)
++        ).all()
+ 
+     output = []
++
+     for user in users:
+         row = {}
+         row['user_id'] = user.id
+@@ -579,6 +685,39 @@ def get_users_list_restricted():
+     return output
+ 
+ 
++def user_is_visible_to_user(target_user_id: int,
++                            current_user_id: int,
++                            is_server_administrator: bool = False) -> bool:
++    """
++    Check whether one user may discover another user.
++
++    Admins may resolve every account.
++    Normal users may only resolve themselves or users sharing
++    at least one customer with them.
++    """
++    if is_server_administrator:
++        return True
++
++    if target_user_id == current_user_id:
++        return True
++
++    client_ids = [
++        row[0] for row in UserClient.query.with_entities(
++            UserClient.client_id
++        ).filter(
++            UserClient.user_id == current_user_id
++        ).all()
++    ]
++
++    if not client_ids:
++        return False
++
++    return UserClient.query.filter(
++        UserClient.user_id == target_user_id,
++        UserClient.client_id.in_(client_ids)
++    ).first() is not None
++
++
+ def get_users_view_from_user_id(user_id):
+     organisations = get_user_organisations(user_id)
+     orgs_id = [uo.get('org_id') for uo in organisations]
+@@ -706,6 +845,7 @@ def delete_user(user_id):
+     UserCaseAccess.query.filter(UserCaseAccess.user_id == user_id).delete()
+     UserOrganisation.query.filter(UserOrganisation.user_id == user_id).delete()
+     UserGroup.query.filter(UserGroup.user_id == user_id).delete()
++    UserClient.query.filter(UserClient.user_id == user_id).delete()
+     UserCaseEffectiveAccess.query.filter(UserCaseEffectiveAccess.user_id == user_id).delete()
+ 
+     User.query.filter(User.id == user_id).delete()
+diff --git a/source/app/iris_engine/access_control/utils.py b/source/app/iris_engine/access_control/utils.py
+index 1b4af272..30aad85a 100644
+--- a/source/app/iris_engine/access_control/utils.py
++++ b/source/app/iris_engine/access_control/utils.py
+@@ -36,7 +36,11 @@ def ac_get_mask_full_permissions():
+     return am
+ 
+ 
+-def get_auto_follow_groups():
++def get_auto_follow_groups(customer_id=None):
++    """Return auto-follow users only when they belong to the case customer."""
++    if customer_id is None:
++        return []
++
+     return UserGroup.query.with_entities(
+         Group.group_auto_follow_access_level,
+         Group.group_id,
+@@ -45,6 +49,12 @@ def get_auto_follow_groups():
+         UserGroup.user
+     ).join(
+         UserGroup.group
++    ).join(
++        UserClient,
++        and_(
++            UserClient.user_id == User.id,
++            UserClient.client_id == customer_id
++        )
+     ).filter(
+         Group.group_auto_follow == True
+     ).all()
+@@ -288,8 +298,41 @@ def ac_trace_effective_user_permissions(user_id):
+ 
+ def ac_fast_check_user_has_case_access(user_id, cid, access_level):
+     """
+-    Returns true if the user has access to the case
++    Return the effective access level if the user is allowed to access the case.
++
++    For non-platform administrators, UserClient membership is a mandatory
++    tenant boundary. The materialized UserCaseEffectiveAccess table may
++    restrict access further, but it can never expand access beyond the
++    tenant membership/access level.
+     """
++
++    target_user = User.query.filter(
++        User.id == user_id
++    ).first()
++
++    if target_user is None:
++        return None
++
++    is_platform_admin = ac_user_has_permission(
++        target_user,
++        Permissions.server_administrator
++    )
++
++    client_access = None
++
++    # Tenant membership is mandatory for every non-platform-admin user.
++    if not is_platform_admin:
++        client_access = check_ua_case_client(user_id, cid)
++
++        if client_access is None:
++            return None
++
++        if ac_flag_match_mask(
++            client_access.access_level,
++            CaseAccessLevel.deny_all.value
++        ):
++            return None
++
+     ucea = UserCaseEffectiveAccess.query.with_entities(
+         UserCaseEffectiveAccess.access_level
+     ).filter(
+@@ -298,32 +341,94 @@ def ac_fast_check_user_has_case_access(user_id, cid, access_level):
+     ).first()
+ 
+     if not ucea:
+-        # The user has no explicit access
+-        # Check if the user has standard or admin access
+-        if not ac_current_user_has_permission(Permissions.server_administrator):
++        # Preserve the native Platform Administrator fallback behavior.
++        if not is_platform_admin:
+             return None
+ 
+-        if not ac_current_user_has_permission(Permissions.standard_user):
++        if not ac_user_has_permission(
++            target_user,
++            Permissions.standard_user
++        ):
+             return None
+ 
+-        # and then check if he is part of the client
+         cuacu = check_ua_case_client(user_id, cid)
++
+         if cuacu is None:
+             return None
+-        ac_set_case_access_for_user(user_id, cid, cuacu.access_level)
++
++        ac_set_case_access_for_user(
++            user_id,
++            cid,
++            cuacu.access_level
++        )
+ 
+         return cuacu.access_level
+ 
+-    if ac_flag_match_mask(ucea[0], CaseAccessLevel.deny_all.value):
++    if ac_flag_match_mask(
++        ucea[0],
++        CaseAccessLevel.deny_all.value
++    ):
++        return None
++
++    # Platform Administrator keeps native effective-access behavior.
++    if is_platform_admin:
++        for acl in access_level:
++            if ac_flag_match_mask(ucea[0], acl.value):
++                return ucea[0]
++
++        return None
++
++    # --------------------------------------------------------
++    # Effective non-admin access is the LOWER of:
++    #
++    #   UserClient tenant access
++    #   UserCaseEffectiveAccess object access
++    #
++    # This prevents stale or manually-created UCEA rows from
++    # escalating a read-only tenant user to full case access.
++    # --------------------------------------------------------
++
++    def _access_rank(level):
++        if ac_flag_match_mask(
++            level,
++            CaseAccessLevel.full_access.value
++        ):
++            return 2
++
++        if ac_flag_match_mask(
++            level,
++            CaseAccessLevel.read_only.value
++        ):
++            return 1
++
++        return 0
++
++    effective_rank = min(
++        _access_rank(client_access.access_level),
++        _access_rank(ucea[0])
++    )
++
++    if effective_rank == 0:
+         return None
+ 
+     for acl in access_level:
+-        if ac_flag_match_mask(ucea[0], acl.value):
+-            return ucea[0]
++
++        if (
++            acl == CaseAccessLevel.full_access
++            and effective_rank >= 2
++        ):
++            return CaseAccessLevel.full_access.value
++
++        if (
++            acl == CaseAccessLevel.read_only
++            and effective_rank >= 1
++        ):
++            return CaseAccessLevel.read_only.value
+ 
+     return None
+ 
+ 
++
+ def ac_fast_check_current_user_has_case_access(cid, access_level):
+     return ac_fast_check_user_has_case_access(current_user.id, cid, access_level)
+ 
+@@ -417,7 +522,7 @@ def ac_set_new_case_access(org_members, case_id, customer_id = None):
+     Set a new case access
+     """
+ 
+-    users = ac_apply_autofollow_groups_access(case_id)
++    users = ac_apply_autofollow_groups_access(case_id, customer_id=customer_id)
+     if current_user.id in users.keys():
+         del users[current_user.id]
+ 
+@@ -458,12 +563,12 @@ def ac_set_new_case_access(org_members, case_id, customer_id = None):
+         ac_add_user_effective_access_from_map(users_map, case_id)
+ 
+ 
+-def ac_apply_autofollow_groups_access(case_id):
++def ac_apply_autofollow_groups_access(case_id, customer_id=None):
+     """
+     Apply a direct effective user access to users within a group
+     """
+ 
+-    groups = get_auto_follow_groups()
++    groups = get_auto_follow_groups(customer_id)
+     users = ac_combine_groups_access(groups)
+ 
+     rows_to_push = []
+diff --git a/source/app/iris_engine/updater/updater.py b/source/app/iris_engine/updater/updater.py
+index 83461348..355ab290 100644
+--- a/source/app/iris_engine/updater/updater.py
++++ b/source/app/iris_engine/updater/updater.py
+@@ -42,6 +42,17 @@ from app.iris_engine.backup.backup import backup_iris_db
+ from app.models import ServerSettings
+ from iris_interface import IrisInterfaceStatus as IStatus
+ 
++from app.models.authorization import Permissions
++from app.iris_engine.access_control.utils import ac_user_has_permission
++
++
++def _server_update_socket_allowed():
++    return (
++        current_user.is_authenticated
++        and ac_user_has_permission(current_user, Permissions.server_administrator)
++    )
++
++
+ log = app.logger
+ 
+ 
+@@ -73,6 +84,9 @@ def update_log_error(status):
+ @socket_io.on('join-update', namespace='/server-updates')
+ def get_message(data):
+ 
++    if not _server_update_socket_allowed():
++        return False
++
+     room = data['channel']
+     join_room(room=room)
+ 
+@@ -83,6 +97,9 @@ def get_message(data):
+ @socket_io.on('update_ping', namespace='/server-updates')
+ def socket_on_update_ping(msg):
+ 
++    if not _server_update_socket_allowed():
++        return False
++
+     emit('update_ping', {'message': f"Server connected", 'is_error': False},
+          namespace='/server-updates')
+ 
+@@ -90,6 +107,9 @@ def socket_on_update_ping(msg):
+ @socket_io.on('update_get_current_version', namespace='/server-updates')
+ def socket_on_update_do_reboot(msg):
+ 
++    if not _server_update_socket_allowed():
++        return False
++
+     socket_io.emit('update_current_version', {"version": app.config.get('IRIS_VERSION')}, to='iris_update_status',
+                    namespace='/server-updates')
+ 
+diff --git a/source/app/models/authorization.py b/source/app/models/authorization.py
+index 8d62b4cb..7ae23aaa 100644
+--- a/source/app/models/authorization.py
++++ b/source/app/models/authorization.py
+@@ -52,6 +52,18 @@ class Permissions(enum.Enum):
+     custom_dashboards_write = 0x4000
+     custom_dashboards_share = 0x8000
+ 
++    case_delete = 0x10000
++    case_acl_manage = 0x20000
++    platform_tenants_manage = 0x40000
++    tenant_users_read = 0x80000
++    tenant_users_manage = 0x100000
++    cases_read = 0x200000
++    ioc_write = 0x400000
++    ioc_delete = 0x800000
++    alerts_ingest = 0x1000000
++    case_close = 0x2000000
++    case_reopen = 0x4000000
++
+ 
+ class Organisation(db.Model):
+     __tablename__ = 'organisations'
+diff --git a/source/app/post_init.py b/source/app/post_init.py
+index c64d06ab..0e19d8f9 100644
+--- a/source/app/post_init.py
++++ b/source/app/post_init.py
+@@ -51,6 +51,7 @@ from app.iris_engine.module_handler.module_handler import register_module
+ from app.models import create_safe_limited
+ from app.models.alerts import Severity, AlertStatus, AlertResolutionStatus
+ from app.models.authorization import CaseAccessLevel
++from app.models.authorization import Permissions
+ from app.models.authorization import Group
+ from app.models.authorization import Organisation
+ from app.models.authorization import User
+@@ -1008,6 +1009,165 @@ def create_safe_auth_model():
+ 
+     db.session.commit()
+ 
++
++    # -----------------------------------------------------
++    # SOC managed-service roles
++    #
++    # These groups are global role definitions.
++    # Tenant scope is provided separately by UserClient.
++    #
++    # No SOC role receives server_administrator or
++    # platform_tenants_manage.
++    # -----------------------------------------------------
++
++    def _soc_perm_mask(*perms):
++        mask = 0
++        for perm in perms:
++            mask |= perm.value
++        return mask
++
++    soc_viewer_mask = _soc_perm_mask(
++        Permissions.cases_read,
++        Permissions.alerts_read,
++        Permissions.search_across_cases,
++        Permissions.customers_read,
++        Permissions.case_templates_read,
++        Permissions.statistics_read,
++        Permissions.custom_dashboards_read,
++    )
++
++    soc_auditor_mask = (
++        soc_viewer_mask
++        | Permissions.activities_read.value
++        | Permissions.all_activities_read.value
++    )
++
++    soc_l1_mask = (
++        soc_viewer_mask
++        | Permissions.activities_read.value
++        | Permissions.standard_user.value
++        | Permissions.alerts_write.value
++        | Permissions.ioc_write.value
++    )
++
++    soc_l2_mask = (
++        soc_l1_mask
++        | Permissions.case_close.value
++        | Permissions.case_reopen.value
++    )
++
++    soc_l3_mask = (
++        soc_l2_mask
++        | Permissions.alerts_delete.value
++        | Permissions.ioc_delete.value
++    )
++
++    soc_admin_mask = (
++        soc_l3_mask
++        | Permissions.case_delete.value
++        | Permissions.case_acl_manage.value
++        | Permissions.customers_write.value
++        | Permissions.tenant_users_read.value
++        | Permissions.tenant_users_manage.value
++        | Permissions.all_activities_read.value
++    )
++
++
++    wazuh_service_mask = _soc_perm_mask(
++        Permissions.alerts_ingest,
++    )
++
++    opencti_service_mask = _soc_perm_mask(
++        Permissions.cases_read,
++        Permissions.ioc_write,
++    )
++
++    n8n_service_mask = _soc_perm_mask(
++        Permissions.cases_read,
++        Permissions.alerts_read,
++        Permissions.alerts_write,
++        Permissions.ioc_write,
++    )
++
++    soc_roles = [
++        (
++            "SOC Viewer",
++            "SOC read-only analyst",
++            soc_viewer_mask,
++            CaseAccessLevel.read_only.value
++        ),
++        (
++            "SOC Auditor",
++            "SOC read-only auditor",
++            soc_auditor_mask,
++            CaseAccessLevel.read_only.value
++        ),
++        (
++            "SOC L1",
++            "SOC Level 1 analyst",
++            soc_l1_mask,
++            CaseAccessLevel.full_access.value
++        ),
++        (
++            "SOC L2",
++            "SOC Level 2 analyst",
++            soc_l2_mask,
++            CaseAccessLevel.full_access.value
++        ),
++        (
++            "SOC L3",
++            "SOC Level 3 analyst",
++            soc_l3_mask,
++            CaseAccessLevel.full_access.value
++        ),
++        (
++            "SOC Admin",
++            "Tenant-scoped SOC administrator",
++            soc_admin_mask,
++            CaseAccessLevel.full_access.value
++        ),
++        (
++            "Wazuh Service",
++            "Least-privilege Wazuh alert ingestion service account",
++            wazuh_service_mask,
++            CaseAccessLevel.deny_all.value
++        ),
++        (
++            "OpenCTI Service",
++            "Least-privilege OpenCTI IOC synchronization service account",
++            opencti_service_mask,
++            CaseAccessLevel.read_only.value
++        ),
++        (
++            "n8n Automation",
++            "Least-privilege SOC automation service account",
++            n8n_service_mask,
++            CaseAccessLevel.read_only.value
++        ),
++    ]
++
++    for role_name, role_desc, role_mask, role_access in soc_roles:
++
++        # Role names are globally unique. Look up by name only so
++        # permission/access changes update the existing role instead
++        # of attempting to create a duplicate group.
++        role = Group.query.filter(
++            Group.group_name == role_name
++        ).first()
++
++        if role is None:
++            role = Group()
++            role.group_name = role_name
++            db.session.add(role)
++
++        # Keep fixed SOC/service role definitions controlled by platform.
++        role.group_description = role_desc
++        role.group_permissions = role_mask
++        role.group_auto_follow = False
++        role.group_auto_follow_access_level = role_access
++
++    db.session.commit()
++
+     return def_org, gadm, ganalysts
+ 
+ 
+-- 
+2.53.0
+

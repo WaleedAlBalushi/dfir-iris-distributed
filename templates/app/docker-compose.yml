@@ -58,7 +58,7 @@ services:
       - POSTGRES_PORT
       - IRIS_SECRET_KEY
       - IRIS_SECURITY_PASSWORD_SALT
-      - IRIS_WORKER
+      - IRIS_WORKER=1
     depends_on:
       - rabbitmq
       - app

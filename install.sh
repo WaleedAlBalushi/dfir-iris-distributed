@@ -9,6 +9,11 @@ BASE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 DEFAULT_IRIS_VERSION="v2.4.29"
 REPO_URL="https://github.com/dfir-iris/iris-web.git"
 
+SOC_VERSION_FILE="$BASE_DIR/soc/VERSION"
+SOC_BASE_FILE="$BASE_DIR/soc/BASE_COMMIT"
+SOC_PATCH_DIR="$BASE_DIR/soc/patches"
+SOC_IMAGE_NAME="iris-soc"
+
 banner() {
   printf '\n============================================================\n'
   printf '        DFIR-IRIS Distributed Installer v1.1\n'
@@ -37,6 +42,78 @@ env_line() {
   local key=$1 value=$2
   validate_env_value "$key" "$value"
   printf "%s='%s'\n" "$key" "$value"
+}
+
+soc_release() {
+  [ -f "$SOC_VERSION_FILE" ] || die "SOC VERSION file missing: $SOC_VERSION_FILE"
+  tr -d '[:space:]' <"$SOC_VERSION_FILE"
+}
+
+soc_base_commit() {
+  [ -f "$SOC_BASE_FILE" ] || die "SOC BASE_COMMIT file missing: $SOC_BASE_FILE"
+  tr -d '[:space:]' <"$SOC_BASE_FILE"
+}
+
+prepare_soc_source() {
+  local source_dir=$1
+  local expected_base actual_base patch
+  local patches=()
+
+  expected_base=$(soc_base_commit)
+  actual_base=$(git -C "$source_dir" rev-parse HEAD)
+
+  [ "$actual_base" = "$expected_base" ] || \
+    die "IRIS base mismatch. Expected $expected_base but cloned $actual_base"
+
+  shopt -s nullglob
+  patches=("$SOC_PATCH_DIR"/*.patch)
+  shopt -u nullglob
+
+  [ "${#patches[@]}" -gt 0 ] || \
+    die "No SOC patches found in $SOC_PATCH_DIR"
+
+  for patch in "${patches[@]}"; do
+    info "Checking SOC patch: $(basename "$patch")"
+    git -C "$source_dir" apply --check "$patch" || \
+      die "SOC patch validation failed: $(basename "$patch")"
+
+    info "Applying SOC patch: $(basename "$patch")"
+    git -C "$source_dir" apply "$patch"
+  done
+
+  mkdir -p "$source_dir/.soc-build/patches"
+
+  cp "$SOC_VERSION_FILE" "$source_dir/.soc-build/VERSION"
+  cp "$SOC_BASE_FILE" "$source_dir/.soc-build/BASE_COMMIT"
+  cp "$SOC_PATCH_DIR"/*.patch "$source_dir/.soc-build/patches/"
+
+  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    >"$source_dir/.soc-build/BUILD_TIME"
+
+  ok "SOC source prepared: $(soc_release)"
+}
+
+build_soc_app_image() {
+  local source_dir=$1
+  local release image
+
+  release=$(soc_release)
+  image="${SOC_IMAGE_NAME}:${release}"
+
+  info "Building customized IRIS SOC image: $image"
+
+  docker build \
+    --label "org.opencontainers.image.title=DFIR-IRIS SOC" \
+    --label "org.opencontainers.image.version=$release" \
+    --label "org.opencontainers.image.revision=$(soc_base_commit)" \
+    -t "$image" \
+    -f "$source_dir/docker/webApp/Dockerfile" \
+    "$source_dir"
+
+  docker image inspect "$image" --format '{{.Id}}' \
+    >"$source_dir/.soc-build/IMAGE_ID"
+
+  ok "SOC image built successfully: $image"
 }
 
 prepare_target_dir() {
@@ -202,8 +279,10 @@ install_application_role() {
   local version install_dir db_host db_port db_name db_user db_pass db_admin_user db_admin_pass
   local public_host https_port admin_user admin_email admin_pass iris_secret iris_salt api_key external_url
   local import_choice connection_file=""
+  local soc_ver
 
-  version=$(prompt_default "IRIS release" "$DEFAULT_IRIS_VERSION")
+  version="$DEFAULT_IRIS_VERSION"
+  soc_ver=$(soc_release)
 
   printf '\nDatabase configuration source\n'
   printf '  1) Enter database details manually\n'
@@ -291,6 +370,9 @@ install_application_role() {
   git clone --depth 1 --branch "$version" "$REPO_URL" "$install_dir"
   cd "$install_dir"
 
+  prepare_soc_source "$install_dir"
+  build_soc_app_image "$install_dir"
+
   cp "$BASE_DIR/templates/app/docker-compose.yml" "$install_dir/docker-compose.distributed-app.yml"
   cp "$BASE_DIR/templates/app/setup.sh" "$install_dir/setup.sh"
   mkdir -p "$install_dir/lib" "$install_dir/integrations"
@@ -302,8 +384,8 @@ install_application_role() {
   {
     env_line IRIS_RELEASE "$version"
     env_line COMPOSE_PROJECT_NAME "iris-app"
-    env_line APP_IMAGE_NAME "ghcr.io/dfir-iris/iriswebapp_app"
-    env_line APP_IMAGE_TAG "$version"
+    env_line APP_IMAGE_NAME "$SOC_IMAGE_NAME"
+    env_line APP_IMAGE_TAG "$soc_ver"
     env_line NGINX_IMAGE_NAME "ghcr.io/dfir-iris/iriswebapp_nginx"
     env_line NGINX_IMAGE_TAG "$version"
     env_line SERVER_NAME "$public_host"
@@ -348,8 +430,8 @@ install_application_role() {
 
   info "Validating distributed application Compose configuration."
   docker compose -p iris-app -f docker-compose.distributed-app.yml config >/dev/null
-  info "Pulling IRIS application images."
-  docker compose -p iris-app -f docker-compose.distributed-app.yml pull
+  info "Pulling external application dependencies."
+  docker compose -p iris-app -f docker-compose.distributed-app.yml pull rabbitmq nginx
   info "Starting RabbitMQ, IRIS App, Worker, and Nginx."
   docker compose -p iris-app -f docker-compose.distributed-app.yml up -d
 
@@ -383,7 +465,9 @@ install_single_node() {
   banner
   warn "Single-Node mode is intended for lab/testing. The distributed DB/APP roles are the primary design."
   local version install_dir public_host https_port admin_user admin_email admin_pass db_pass db_admin_pass
-  version=$(prompt_default "IRIS release" "$DEFAULT_IRIS_VERSION")
+  local soc_ver
+  version="$DEFAULT_IRIS_VERSION"
+  soc_ver=$(soc_release)
   while :; do
     install_dir=$(prompt_default "Install directory" "/opt/iris-single")
     if prepare_target_dir "$install_dir"; then break; else rc=$?; [ "$rc" -eq 2 ] && continue; return 0; fi
@@ -398,6 +482,16 @@ install_single_node() {
   rm -rf "$install_dir"
   git clone --depth 1 --branch "$version" "$REPO_URL" "$install_dir"
   cd "$install_dir"
+
+  prepare_soc_source "$install_dir"
+  build_soc_app_image "$install_dir"
+
+  # IRIS_WORKER must be set only for the worker service.
+  # Never place it in the shared .env because the web App then behaves as a worker.
+  sed -i '/^[[:space:]]*- IRIS_WORKER$/s/IRIS_WORKER$/IRIS_WORKER=1/'     "$install_dir/docker-compose.base.yml"
+
+  grep -q 'IRIS_WORKER=1' "$install_dir/docker-compose.base.yml" ||     die "Unable to configure the Single-Node worker environment"
+
   {
     env_line NGINX_IMAGE_NAME "ghcr.io/dfir-iris/iriswebapp_nginx"
     env_line NGINX_IMAGE_TAG "$version"
@@ -413,8 +507,8 @@ install_single_node() {
     env_line POSTGRES_DB "iris_db"
     env_line POSTGRES_SERVER "db"
     env_line POSTGRES_PORT "5432"
-    env_line APP_IMAGE_NAME "ghcr.io/dfir-iris/iriswebapp_app"
-    env_line APP_IMAGE_TAG "$version"
+    env_line APP_IMAGE_NAME "$SOC_IMAGE_NAME"
+    env_line APP_IMAGE_TAG "$soc_ver"
     env_line DOCKERIZED "1"
     env_line IRIS_SECRET_KEY "$(random_hex 32)"
     env_line IRIS_SECURITY_PASSWORD_SALT "$(random_hex 24)"
@@ -432,7 +526,7 @@ install_single_node() {
   cp "$BASE_DIR/templates/single/setup.sh" "$install_dir/setup.sh"
   chmod 750 "$install_dir/setup.sh"
   printf 'single-node\n' >"$install_dir/.iris-role"
-  docker compose pull
+  docker compose pull rabbitmq db nginx
   docker compose up -d
   info "Single-node IRIS started. Management: $install_dir/setup.sh"
 }
@@ -446,7 +540,7 @@ main_menu() {
     printf '  2) Application Server\n'
     printf '     Nginx + IRIS App + Worker + RabbitMQ\n\n'
     printf '  3) Single-Node / Lab\n'
-    printf '     Official all-in-one service layout\n\n'
+    printf '     SOC-hardened all-in-one service layout\n\n'
     printf '  0) Exit\n\nChoose: '
     local c
     IFS= read -r c || exit 0
