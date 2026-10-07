@@ -778,7 +778,7 @@ wazuh_selection_self_test() {
   unset WAZUH_VALIDATION_TEST_MODE
   unset WAZUH_TOPOLOGY_TEST_RECORDS
 
-  if sed -n '/^OPENCTI_BRIDGE_DIR=/,/^wazuh_menu()/p' "$0" | grep -Eq 'show_wazuh_topology|select_wazuh_manager_containers|list_local_wazuh|validate_wazuh_manager_container'; then
+  if sed -n '/^OPENCTI_BRIDGE_DIR=/,/^wazuh_menu()/p' "${BASH_SOURCE[0]}" | grep -Eq 'show_wazuh_topology|select_wazuh_manager_containers|list_local_wazuh|validate_wazuh_manager_container'; then
     wazuh_selection_self_test_fail "OpenCTI block contains Wazuh topology function calls"
     failures=$((failures + 1))
   fi
