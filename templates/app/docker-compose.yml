@@ -93,6 +93,6 @@ volumes:
 
 networks:
   iris_backend:
-    name: iris_app_backend
+    name: "${IRIS_BACKEND_NETWORK:-iris_app_backend}"
   iris_frontend:
-    name: iris_app_frontend
+    name: "${IRIS_FRONTEND_NETWORK:-iris_app_frontend}"
