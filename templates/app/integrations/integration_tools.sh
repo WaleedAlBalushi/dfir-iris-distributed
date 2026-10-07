@@ -391,6 +391,61 @@ PYKEY
   return 1
 }
 
+
+detect_wazuh_api_key() {
+  load_env
+
+  if [ -n "${WAZUH_IRIS_API_KEY:-}" ]; then
+    printf '%s\n' "$WAZUH_IRIS_API_KEY"
+    return 0
+  fi
+
+  if [ -f "$DIR/secrets/wazuh-service.env" ]; then
+    key=$(awk -F= '$1=="WAZUH_IRIS_API_KEY"{sub(/^[^=]*=/,"");gsub(/^["'\'']|["'\'']$/,"");print;exit}' \
+      "$DIR/secrets/wazuh-service.env" 2>/dev/null || true)
+
+    if [ -n "$key" ]; then
+      printf '%s\n' "$key"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+
+resolve_wazuh_api_key() {
+  key=$(detect_wazuh_api_key || true)
+
+  if [ -z "$key" ]; then
+    key=$(prompt_secret_value "Wazuh Service IRIS API key")
+  fi
+
+  [ -n "$key" ] || die "A dedicated Wazuh Service IRIS API key is required."
+
+  printf '%s\n' "$key"
+}
+
+
+prompt_wazuh_customer_id() {
+  customer_id=""
+
+  while :; do
+    printf '\nIRIS customer ID for this Wazuh integration: ' >&2
+    IFS= read -r customer_id || die "Input stream closed."
+
+    case "$customer_id" in
+      ""|*[!0-9]*)
+        warn "IRIS customer ID is required and must be numeric."
+        ;;
+      *)
+        printf '%s\n' "$customer_id"
+        return 0
+        ;;
+    esac
+  done
+}
+
 list_local_wazuh_containers() {
   if [ -n "${WAZUH_TOPOLOGY_TEST_RECORDS:-}" ]; then
     printf '%s\n' "$WAZUH_TOPOLOGY_TEST_RECORDS" | awk -F '\t' '
@@ -836,11 +891,11 @@ generate_wazuh_remote_bundle() {
   bundle_dir="$bundle_root/remote-bundle-$ts"
   mkdir -p "$bundle_dir"
 
-  customer_id=$(prompt_default "IRIS customer ID" "1")
+  customer_id=$(prompt_wazuh_customer_id)
   min_level=$(prompt_default "Minimum Wazuh alert level to forward" "7")
   case "$customer_id" in *[!0-9]*|"") die "IRIS customer ID must be numeric." ;; esac
   case "$min_level" in *[!0-9]*|"") die "Minimum Wazuh alert level must be numeric." ;; esac
-  api_key=$(detect_iris_api_key || true)
+  api_key=$(resolve_wazuh_api_key)
   [ -n "$api_key" ] || die "Could not detect an IRIS API key from .env, saved credentials, or the running IRIS app container."
 
   iris_hook_url=$(prompt_default "IRIS hook URL reachable from Wazuh" "$(default_iris_hook_url)")
@@ -983,11 +1038,11 @@ $container"
   [ "${#validated_containers[@]}" -gt 0 ] || die "No Wazuh manager container selected."
   containers=("${validated_containers[@]}")
 
-  customer_id=$(prompt_default "IRIS customer ID" "1")
+  customer_id=$(prompt_wazuh_customer_id)
   min_level=$(prompt_default "Minimum Wazuh alert level to forward" "7")
   case "$customer_id" in *[!0-9]*|"") die "IRIS customer ID must be numeric." ;; esac
   case "$min_level" in *[!0-9]*|"") die "Minimum Wazuh alert level must be numeric." ;; esac
-  api_key=$(detect_iris_api_key || true)
+  api_key=$(resolve_wazuh_api_key)
   [ -n "$api_key" ] || die "Could not detect an IRIS API key from .env, saved credentials, or the running IRIS app container."
 
   iris_hook_url=$(prompt_default "IRIS hook URL reachable from the Wazuh container" "$(default_iris_container_hook_url)")
@@ -1167,7 +1222,7 @@ $container"
 send_wazuh_container_test_alert() {
   container=$1
   iris_hook_url=$2
-  api_key=$(detect_iris_api_key || true)
+  api_key=$(resolve_wazuh_api_key)
   if [ -z "$api_key" ]; then
     warn "Could not detect an IRIS API key from .env, saved credentials, or the running IRIS app container."
     return 1
@@ -1271,8 +1326,8 @@ send_wazuh_test_alert() {
 
   [ -n "$iris_hook_url" ] || iris_hook_url=$(prompt_default "IRIS hook URL reachable from this host" "$(default_iris_hook_url)")
   [ -n "$dashboard_url" ] || dashboard_url=$(prompt_default "Wazuh dashboard source link" "$(default_wazuh_dashboard_url)")
-  [ -n "$customer_id" ] || customer_id=$(prompt_default "IRIS customer ID" "1")
-  api_key=$(detect_iris_api_key || true)
+  [ -n "$customer_id" ] || customer_id=$(prompt_wazuh_customer_id)
+  api_key=$(resolve_wazuh_api_key)
   if [ -z "$api_key" ]; then
     warn "Could not detect an IRIS API key from .env, saved credentials, or the running IRIS app container."
     return 1
@@ -1821,7 +1876,24 @@ opencti_detect_iris_host_ip() {
 }
 
 opencti_default_iris_token() {
-  detect_iris_api_key || true
+  load_env
+
+  if [ -n "${OPENCTI_IRIS_API_KEY:-}" ]; then
+    printf '%s\n' "$OPENCTI_IRIS_API_KEY"
+    return 0
+  fi
+
+  if [ -f "$DIR/secrets/opencti-service.env" ]; then
+    key=$(awk -F= '$1=="OPENCTI_IRIS_API_KEY"{sub(/^[^=]*=/,"");gsub(/^["'\'']|["'\'']$/,"");print;exit}' \
+      "$DIR/secrets/opencti-service.env" 2>/dev/null || true)
+
+    if [ -n "$key" ]; then
+      printf '%s\n' "$key"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 opencti_validate_uint() {
@@ -2094,7 +2166,7 @@ opencti_configure_bridge() {
     [ -n "$iris_url" ] || iris_url=$(prompt_default "IRIS URL" "$(opencti_default_iris_url)")
     detected_iris_token=$(opencti_default_iris_token || true)
     if [ -z "$iris_token" ] && [ -n "$detected_iris_token" ]; then
-      if prompt_yes_no "Use the detected IRIS admin API key from this deployment?"; then
+      if prompt_yes_no "Use the configured OpenCTI Service IRIS API key?"; then
         iris_token=$detected_iris_token
       fi
     fi

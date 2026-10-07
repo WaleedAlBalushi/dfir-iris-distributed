@@ -1,0 +1,60 @@
+diff --git a/source/app/iris_engine/access_control/utils.py b/source/app/iris_engine/access_control/utils.py
+index 30aad85..2426751 100644
+--- a/source/app/iris_engine/access_control/utils.py
++++ b/source/app/iris_engine/access_control/utils.py
+@@ -725,12 +725,52 @@ def ac_set_case_access_for_user(user_id, case_id, access_level, commit=True):
+ 
+ 
+ def ac_get_fast_user_cases_access(user_id):
++    """
++    Return case IDs visible to the user while enforcing UserClient as the
++    hard tenant boundary.
++
++    UserCaseEffectiveAccess may restrict access further, but stale or
++    manually-created UCEA rows must never expose cases from another tenant.
++    """
++    target_user = User.query.filter(
++        User.id == user_id
++    ).first()
++
++    if target_user is None:
++        return []
++
++    # Platform Administrator retains native global behavior.
++    if ac_user_has_permission(
++        target_user,
++        Permissions.server_administrator
++    ):
++        ucea = UserCaseEffectiveAccess.query.with_entities(
++            UserCaseEffectiveAccess.case_id
++        ).filter(
++            UserCaseEffectiveAccess.user_id == user_id,
++            UserCaseEffectiveAccess.access_level != CaseAccessLevel.deny_all.value
++        ).all()
++
++        return [e.case_id for e in ucea]
++
++    # Non-admin users may only receive UCEA case IDs whose case belongs
++    # to one of their UserClient tenant memberships.
+     ucea = UserCaseEffectiveAccess.query.with_entities(
+         UserCaseEffectiveAccess.case_id
+-    ).filter(and_(
++    ).join(
++        Cases,
++        Cases.case_id == UserCaseEffectiveAccess.case_id
++    ).join(
++        UserClient,
++        and_(
++            UserClient.user_id == user_id,
++            UserClient.client_id == Cases.client_id
++        )
++    ).filter(
+         UserCaseEffectiveAccess.user_id == user_id,
+-        UserCaseEffectiveAccess.access_level != CaseAccessLevel.deny_all.value
+-    )).all()
++        UserCaseEffectiveAccess.access_level != CaseAccessLevel.deny_all.value,
++        UserClient.access_level != CaseAccessLevel.deny_all.value
++    ).distinct().all()
+ 
+     return [e.case_id for e in ucea]
+ 

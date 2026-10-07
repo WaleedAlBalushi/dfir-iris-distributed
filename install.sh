@@ -411,6 +411,8 @@ install_application_role() {
     env_line IRIS_ADM_EMAIL "$admin_email"
     env_line IRIS_ADM_PASSWORD "$admin_pass"
     env_line IRIS_ADM_API_KEY "$api_key"
+    env_line WAZUH_IRIS_API_KEY ""
+    env_line OPENCTI_IRIS_API_KEY ""
     env_line IRIS_BIND_ADDRESS "$bind_address"
     env_line INTERFACE_HTTPS_PORT "$https_port"
     env_line PUBLIC_HOST "$public_host"
