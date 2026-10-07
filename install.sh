@@ -277,7 +277,7 @@ install_application_role() {
   printf 'Role selected: Application Server\n'
 
   local version install_dir db_host db_port db_name db_user db_pass db_admin_user db_admin_pass
-  local public_host https_port admin_user admin_email admin_pass iris_secret iris_salt api_key external_url
+  local public_host bind_address https_port admin_user admin_email admin_pass iris_secret iris_salt api_key external_url
   local import_choice connection_file=""
   local soc_ver
 
@@ -329,6 +329,7 @@ install_application_role() {
   detected=$(primary_ipv4 || true)
   [ -n "$detected" ] || detected=$(hostname -f 2>/dev/null || hostname)
   public_host=$(prompt_default "IRIS hostname, FQDN, or IP" "$detected")
+  bind_address=$(prompt_default "HTTPS bind address" "0.0.0.0")
   while :; do
     https_port=$(prompt_default "HTTPS port" "443")
     validate_port "$https_port" && break
@@ -353,6 +354,7 @@ install_application_role() {
   printf 'IRIS version:      %s\n' "$version"
   printf 'Install path:      %s\n' "$install_dir"
   printf 'Application host:  %s\n' "$public_host"
+  printf 'HTTPS bind:        %s\n' "$bind_address"
   printf 'HTTPS port:        %s\n' "$https_port"
   printf 'Database server:   %s:%s\n' "$db_host" "$db_port"
   printf 'Database:          %s\n' "$db_name"
@@ -409,6 +411,7 @@ install_application_role() {
     env_line IRIS_ADM_EMAIL "$admin_email"
     env_line IRIS_ADM_PASSWORD "$admin_pass"
     env_line IRIS_ADM_API_KEY "$api_key"
+    env_line IRIS_BIND_ADDRESS "$bind_address"
     env_line INTERFACE_HTTPS_PORT "$https_port"
     env_line PUBLIC_HOST "$public_host"
     env_line IRIS_EXTERNAL_URL "$external_url"
