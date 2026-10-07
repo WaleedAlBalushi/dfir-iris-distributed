@@ -4,7 +4,9 @@ set -Eeuo pipefail
 IFS='
 	'
 
-DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -z "${DIR:-}" ]; then
+  DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+fi
 cd "$DIR"
 
 info() { printf '[INFO] %s\n' "$*"; }
